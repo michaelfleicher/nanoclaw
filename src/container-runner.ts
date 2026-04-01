@@ -26,6 +26,7 @@ import {
   stopContainer,
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
+import { readEnvFile } from './env.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
@@ -231,21 +232,31 @@ function buildContainerArgs(
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
-  // Route API traffic through the credential proxy (containers never see real secrets)
-  args.push(
-    '-e',
-    `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
-  );
+  // Check if Bedrock mode is configured
+  const bedrockEnv = readEnvFile(['CLAUDE_CODE_USE_BEDROCK', 'AWS_REGION']);
+  const useBedrock = bedrockEnv.CLAUDE_CODE_USE_BEDROCK === '1';
 
-  // Mirror the host's auth method with a placeholder value.
-  // API key mode: SDK sends x-api-key, proxy replaces with real key.
-  // OAuth mode:   SDK exchanges placeholder token for temp API key,
-  //               proxy injects real OAuth token on that exchange request.
-  const authMode = detectAuthMode();
-  if (authMode === 'api-key') {
-    args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
+  if (useBedrock) {
+    // Bedrock mode: pass AWS env vars, containers get credentials via IMDS (EC2 IAM role)
+    args.push('-e', 'CLAUDE_CODE_USE_BEDROCK=1');
+    args.push('-e', `AWS_REGION=${bedrockEnv.AWS_REGION || 'us-east-1'}`);
   } else {
-    args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+    // Route API traffic through the credential proxy (containers never see real secrets)
+    args.push(
+      '-e',
+      `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
+    );
+
+    // Mirror the host's auth method with a placeholder value.
+    // API key mode: SDK sends x-api-key, proxy replaces with real key.
+    // OAuth mode:   SDK exchanges placeholder token for temp API key,
+    //               proxy injects real OAuth token on that exchange request.
+    const authMode = detectAuthMode();
+    if (authMode === 'api-key') {
+      args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
+    } else {
+      args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+    }
   }
 
   // Runtime-specific args for host gateway resolution
